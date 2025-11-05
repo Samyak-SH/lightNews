@@ -24,6 +24,7 @@ const CategoryStatsSchema = new mongoose.Schema(
 const UserSchema = new mongoose.Schema(
   {
     _id: { type: String, required: true }, // userId from client
+    password: { type: String },
     filters: [{ type: String, enum: CATEGORY_LIST }],
     stats: {
       type: Map,
