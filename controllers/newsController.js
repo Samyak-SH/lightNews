@@ -64,6 +64,15 @@ async function fetchMixed(categories, pageSizePerCat = 3, country = NEWS_COUNTRY
   return merged;
 }
 
+// -------- Fallback: Always guarantee articles --------
+async function guaranteedArticles(list, country, limit = 10) {
+  if (list && list.length > 0) return list.slice(0, limit);
+
+  console.warn("⚠️ Empty result, applying fallback...");
+  const fallback = await fetchMixed(CATEGORY_LIST, 4, country);
+  return fallback.slice(0, limit);
+}
+
 // -------- Seen list filter --------
 function filterNewArticlesForUser(user, articles, keep = 20) {
   const seenSet = new Set(user.seen || []);
@@ -87,10 +96,8 @@ exports.initFeed = async (req, res) => {
     let { userId, filters, diversify = true, country } = req.body || {};
     if (!userId) return res.status(400).json({ error: 'userId required' });
 
-    // normalize country
     country = typeof country === 'string' ? country : NEWS_COUNTRY_DEFAULT;
 
-    // normalize filters
     const normalizedFilters = Array.isArray(filters)
       ? filters
       : typeof filters === 'string'
@@ -106,7 +113,6 @@ exports.initFeed = async (req, res) => {
       await user.save();
     }
 
-    // detect cold start (no stats)
     const hasNoStats = [...user.stats.values()].every(
       (s) => ((s.likes || 0) + (s.dislikes || 0)) === 0
     );
@@ -123,11 +129,11 @@ exports.initFeed = async (req, res) => {
       const cats = (user.filters?.length ? user.filters : CATEGORY_LIST).slice(0);
       const mix = cats.length > 3 ? cats.sort(() => 0.5 - Math.random()).slice(0, 3) : cats;
       const mixed = await fetchMixed(mix, 5, country);
-      articles = mixed.slice(0, 10);
+      articles = await guaranteedArticles(mixed, country, 10);
     } else {
       const cat = chooseCategoryTS(user);
       const list = await fetchNewsByCategory(cat, 12, country);
-      articles = list.slice(0, 10);
+      articles = await guaranteedArticles(list, country, 10);
     }
 
     const fresh = filterNewArticlesForUser(user, articles);
@@ -195,7 +201,6 @@ exports.handleSwipe = async (req, res) => {
       }
     }
 
-    // next category decision
     let nextCategory = null;
     let bestLiked = null;
     for (const [cat, t] of batchTally.entries()) {
@@ -206,7 +211,8 @@ exports.handleSwipe = async (req, res) => {
     nextCategory = bestLiked ? bestLiked.cat : chooseCategoryTS(user);
 
     let more = await fetchNewsByCategory(nextCategory, 10, country);
-    more = filterNewArticlesForUser(user, more).slice(0, 5);
+    more = await guaranteedArticles(more, country, 5);
+    more = filterNewArticlesForUser(user, more);
 
     await user.save();
 
@@ -240,6 +246,7 @@ exports.categoryFeed = async (req, res) => {
     const countrySafe = typeof country === 'string' ? country : NEWS_COUNTRY_DEFAULT;
 
     let list = await fetchNewsByCategory(category, Number(pageSize), countrySafe);
+    list = await guaranteedArticles(list, countrySafe, Number(pageSize));
     list = filterNewArticlesForUser(user, list);
 
     await user.save();
