@@ -11,7 +11,7 @@ const newsClient = axios.create({
   timeout: 10000
 });
 
-// -------- Sanitizer --------
+// ------ Sanitize ------
 function sanitizeArticle(a) {
   if (!a) return null;
   return {
@@ -26,24 +26,22 @@ function sanitizeArticle(a) {
   };
 }
 
-// -------- Fetch helpers --------
-async function fetchNewsByCategory(category, pageSize = 10, country = NEWS_COUNTRY_DEFAULT) {
-  const params = { category, apiKey: NEWS_API_KEY, pageSize, country };
+// ------ Fetch helpers ------
+async function fetchNewsByCategory(category, pageSize = 10, country = NEWS_COUNTRY_DEFAULT, page = 1) {
+  const params = { category, apiKey: NEWS_API_KEY, pageSize, country, page };
   const { data } = await newsClient.get('/top-headlines', { params });
 
   if (data.status === 'error') {
     console.error('NewsAPI error:', data);
     return [];
   }
-
   return (data.articles || []).map(sanitizeArticle).filter(Boolean);
 }
 
 async function fetchMixed(categories, pageSizePerCat = 3, country = NEWS_COUNTRY_DEFAULT) {
-  const chunks = await Promise.all(categories.map((c) =>
-    fetchNewsByCategory(c, pageSizePerCat, country)
-  ));
-
+  const chunks = await Promise.all(
+    categories.map((c) => fetchNewsByCategory(c, pageSizePerCat, country, 1))
+  );
   const merged = [];
   const seen = new Set();
   let idx = 0;
@@ -64,17 +62,17 @@ async function fetchMixed(categories, pageSizePerCat = 3, country = NEWS_COUNTRY
   return merged;
 }
 
-// -------- Fallback: Always guarantee articles --------
+// ------ Fallback: guarantee articles ------
 async function guaranteedArticles(list, country, limit = 10) {
   if (list && list.length > 0) return list.slice(0, limit);
 
-  console.warn("⚠️ Empty result, applying fallback...");
+  console.warn('⚠️ Empty result, applying fallback...');
   const fallback = await fetchMixed(CATEGORY_LIST, 4, country);
   return fallback.slice(0, limit);
 }
 
-// -------- Seen list filter --------
-function filterNewArticlesForUser(user, articles, keep = 20) {
+// ------ Seen filter ------
+function filterNewArticlesForUser(user, articles, keep = 200) {
   const seenSet = new Set(user.seen || []);
   const fresh = [];
 
@@ -90,7 +88,38 @@ function filterNewArticlesForUser(user, articles, keep = 20) {
   return fresh;
 }
 
-// -------- /api/init --------
+// ------ Paginated fresh pull ------
+async function fetchFreshFromCategory(user, category, targetCount, country) {
+  const MAX_PAGES = 10;
+  const PAGE_SIZE = Math.max(targetCount, 10);
+
+  let page = Number(user.pageByCategory.get(category) || 1);
+
+  const fresh = [];
+  const seenSet = new Set(user.seen || []);
+
+  for (let i = 0; i < MAX_PAGES && fresh.length < targetCount; i++) {
+    const list = await fetchNewsByCategory(category, PAGE_SIZE, country, page);
+
+    for (const a of list) {
+      if (a?.url && !seenSet.has(a.url)) {
+        fresh.push(a);
+        seenSet.add(a.url);
+      }
+      if (fresh.length >= targetCount) break;
+    }
+    page++;
+  }
+
+  // wrap page counter to avoid huge values
+  user.pageByCategory.set(category, page > 50 ? 1 : page);
+
+  return fresh.slice(0, targetCount);
+}
+
+// =====================================================
+// ================   /api/init   ======================
+// =====================================================
 exports.initFeed = async (req, res) => {
   try {
     let { userId, filters, diversify = true, country } = req.body || {};
@@ -128,12 +157,22 @@ exports.initFeed = async (req, res) => {
     if (diversify) {
       const cats = (user.filters?.length ? user.filters : CATEGORY_LIST).slice(0);
       const mix = cats.length > 3 ? cats.sort(() => 0.5 - Math.random()).slice(0, 3) : cats;
-      const mixed = await fetchMixed(mix, 5, country);
-      articles = await guaranteedArticles(mixed, country, 10);
+
+      const chunks = [];
+      for (const c of mix) {
+        const chunk = await fetchFreshFromCategory(user, c, 4, country);
+        chunks.push(...chunk);
+      }
+
+      articles = chunks.slice(0, 10);
+      if (articles.length === 0) {
+        const mixed = await fetchMixed(CATEGORY_LIST, 4, country);
+        articles = mixed.slice(0, 10);
+      }
     } else {
       const cat = chooseCategoryTS(user);
-      const list = await fetchNewsByCategory(cat, 12, country);
-      articles = await guaranteedArticles(list, country, 10);
+      const freshList = await fetchFreshFromCategory(user, cat, 10, country);
+      articles = freshList.length ? freshList : await guaranteedArticles([], country, 10);
     }
 
     const fresh = filterNewArticlesForUser(user, articles);
@@ -154,7 +193,9 @@ exports.initFeed = async (req, res) => {
   }
 };
 
-// -------- /api/swipe --------
+// =====================================================
+// ================   /api/swipe   =====================
+// =====================================================
 exports.handleSwipe = async (req, res) => {
   try {
     const { userId } = req.body || {};
@@ -190,6 +231,7 @@ exports.handleSwipe = async (req, res) => {
 
     for (const { category, articleUrl, reaction } of events) {
       updateStatsOnReaction(user.stats, category, reaction);
+
       const t = batchTally.get(category) || { likes: 0, dislikes: 0 };
       reaction === 'like' ? t.likes++ : t.dislikes++;
       batchTally.set(category, t);
@@ -197,21 +239,25 @@ exports.handleSwipe = async (req, res) => {
       if (articleUrl) {
         const set = new Set(user.seen);
         set.add(articleUrl);
-        user.seen = Array.from(set).slice(-20);
+        user.seen = Array.from(set).slice(-200);
       }
     }
 
     let nextCategory = null;
     let bestLiked = null;
+
     for (const [cat, t] of batchTally.entries()) {
       if (t.likes > t.dislikes && (!bestLiked || t.likes - t.dislikes > bestLiked.margin)) {
         bestLiked = { cat, margin: t.likes - t.dislikes };
       }
     }
+
     nextCategory = bestLiked ? bestLiked.cat : chooseCategoryTS(user);
 
-    let more = await fetchNewsByCategory(nextCategory, 10, country);
-    more = await guaranteedArticles(more, country, 5);
+    let more = await fetchFreshFromCategory(user, nextCategory, 5, country);
+    if (more.length === 0) {
+      more = await guaranteedArticles([], country, 5);
+    }
     more = filterNewArticlesForUser(user, more);
 
     await user.save();
@@ -231,7 +277,9 @@ exports.handleSwipe = async (req, res) => {
   }
 };
 
-// -------- /api/feed --------
+// =====================================================
+// ================   /api/feed   ======================
+// =====================================================
 exports.categoryFeed = async (req, res) => {
   try {
     const { userId, category, pageSize = 10, country } = req.query;
@@ -245,10 +293,12 @@ exports.categoryFeed = async (req, res) => {
 
     const countrySafe = typeof country === 'string' ? country : NEWS_COUNTRY_DEFAULT;
 
-    let list = await fetchNewsByCategory(category, Number(pageSize), countrySafe);
-    list = await guaranteedArticles(list, countrySafe, Number(pageSize));
-    list = filterNewArticlesForUser(user, list);
+    let list = await fetchFreshFromCategory(user, category, Number(pageSize), countrySafe);
+    if (list.length === 0) {
+      list = await guaranteedArticles([], countrySafe, Number(pageSize));
+    }
 
+    list = filterNewArticlesForUser(user, list);
     await user.save();
 
     res.json({ userId: user._id, category, articles: list });
@@ -258,7 +308,9 @@ exports.categoryFeed = async (req, res) => {
   }
 };
 
-// -------- /api/categories --------
+// =====================================================
+// ================   /api/categories   ================
+// =====================================================
 exports.listCategories = (req, res) => {
   res.json({ categories: CATEGORY_LIST });
 };

@@ -1,9 +1,7 @@
-// utils/ai.js
 // Lightweight AI logic: Thompson Sampling + stats update
-
 const { CATEGORY_LIST } = require('../models/User');
 
-// -------- Beta + Gamma Sampling Helpers --------
+
 function drawBeta(a, b) {
   function gammaSample(k) {
     if (k < 1) {
@@ -24,52 +22,37 @@ function drawBeta(a, b) {
       if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
     }
   }
-
   function gaussianSample() {
     let u = 0, v = 0;
     while (u === 0) u = Math.random();
     while (v === 0) v = Math.random();
     return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2 * Math.PI * v);
   }
-
   const x = gammaSample(a);
   const y = gammaSample(b);
   return x / (x + y);
 }
 
-// -------- Thompson Sampling (category selection) --------
+
 function chooseCategoryTS(user) {
   const candidates = user.filters?.length ? user.filters : CATEGORY_LIST;
   let best = null;
   let score = -Infinity;
-
   for (const c of candidates) {
     const s = user.stats.get(c) || { a: 1, b: 1 };
     const sample = drawBeta(Math.max(1, s.a), Math.max(1, s.b));
-    if (sample > score) {
-      score = sample;
-      best = c;
-    }
+    if (sample > score) { score = sample; best = c; }
   }
   return best || candidates[0];
 }
 
-// -------- Update stats on swipe reaction --------
+
 function updateStatsOnReaction(stats, category, reaction) {
   const s = stats.get(category) || { a: 1, b: 1, likes: 0, dislikes: 0 };
-
-  if (reaction === 'like') {
-    s.likes = (s.likes || 0) + 1;
-    s.a = (s.a || 1) + 1;
-  } else {
-    s.dislikes = (s.dislikes || 0) + 1;
-    s.b = (s.b || 1) + 1;
-  }
-
+  if (reaction === 'like') { s.likes = (s.likes || 0) + 1; s.a = (s.a || 1) + 1; }
+  else { s.dislikes = (s.dislikes || 0) + 1; s.b = (s.b || 1) + 1; }
   stats.set(category, s);
 }
 
-module.exports = {
-  chooseCategoryTS,
-  updateStatsOnReaction
-};
+
+module.exports = { chooseCategoryTS, updateStatsOnReaction };

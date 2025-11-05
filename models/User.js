@@ -1,5 +1,5 @@
-// models/User.js
 const mongoose = require('mongoose');
+
 
 const CATEGORY_LIST = [
   'business',
@@ -11,15 +11,17 @@ const CATEGORY_LIST = [
   'technology'
 ];
 
+
 const CategoryStatsSchema = new mongoose.Schema(
   {
     likes: { type: Number, default: 0 },
     dislikes: { type: Number, default: 0 },
     a: { type: Number, default: 1 }, // Beta prior α
-    b: { type: Number, default: 1 }  // Beta prior β
+    b: { type: Number, default: 1 } // Beta prior β
   },
   { _id: false }
 );
+
 
 const UserSchema = new mongoose.Schema(
   {
@@ -31,10 +33,19 @@ const UserSchema = new mongoose.Schema(
       of: CategoryStatsSchema,
       default: () => new Map(CATEGORY_LIST.map((c) => [c, {}]))
     },
-    seen: { type: [String], default: [] } // URLs of seen articles
+    seen: { type: [String], default: [] }, // URLs of seen articles
+
+
+    // Per-category page cursor for top-headlines pagination
+    pageByCategory: {
+      type: Map,
+      of: Number,
+      default: () => new Map(CATEGORY_LIST.map((c) => [c, 1]))
+    }
   },
   { timestamps: true }
 );
+
 
 module.exports = {
   User: mongoose.model('User', UserSchema),
